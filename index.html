@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Gesture Interactive 3D Particles</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: monospace; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        #webcam-video {
+            width: 320px;
+            height: 240px;
+            transform: scaleX(-1);
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            border: 2px solid #00ffff;
+            z-index: 10;
+            border-radius: 8px;
+        }
+        #status-display {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #00ffff;
+            font-family: monospace;
+            z-index: 10;
+            border-radius: 8px;
+            border: 1px solid #00ffff;
+            min-width: 200px;
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 15px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #00ffff;
+            z-index: 10;
+            border-radius: 8px;
+            border: 1px solid #00ffff;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="status-display">Status: Initializing...</div>
+    <div id="instructions">
+        🖐️ Move hand left/right/up/down: Rotate particles<br>
+        🤚 Move hand near/far: Zoom in/out<br>
+        👌 Pinch: Control particle size<br>
+        ✊ Fist: Switch modes
+    </div>
+    
+    <video id="webcam-video" autoplay playsinline></video>
+    <div id="canvas-container"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+
+    <script>
+        // --- GLOBAL VARIABLES ---
+        let scene, camera, renderer, clock;
+        let particles, geometry, material;
+        let particleAttributes;
+        const PARTICLE_COUNT = 5000;
+
+        // --- HAND TRACKING VARIABLES ---
+        let hands;
+        let video;
+        let gestureState = {
+            pinchDistance: 1.0,
+            templateIndex: 0,
+            currentGesture: "None",
+            handX: 0,
+            handY: 0,
+            prevHandX: 0,
+            prevHandY: 0,
+            handZ: 0,
+            baseZoom: 5
+        };
+
+        // --- SETUP FUNCTIONS ---
+
+        function initThreeJS() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 5;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            clock = new THREE.Clock();
+            initParticles();
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function initParticles() {
+            const positions = new Float32Array(PARTICLE_COUNT * 3);
+            const colors = new Float32Array(PARTICLE_COUNT * 3);
+            const sizes = new Float32Array(PARTICLE_COUNT);
+            const velocities = new Float32Array(PARTICLE_COUNT * 3);
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                positions[i * 3 + 0] = (Math.random() - 0.5) * 10;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
+
+                colors[i * 3 + 0] = Math.random() * 0.5 + 0.5;
+                colors[i * 3 + 1] = Math.random() * 0.5 + 0.5;
+                colors[i * 3 + 2] = 1.0;
+
+                sizes[i] = Math.random() * 0.5 + 0.1;
+
+                velocities[i * 3 + 0] = 0;
+                velocities[i * 3 + 1] = 0;
+                velocities[i * 3 + 2] = 0;
+            }
+
+            geometry = new THREE.BufferGeometry();
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+            particleAttributes = { positions, colors, sizes, velocities };
+
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    u_pinch_distance: { value: gestureState.pinchDistance },
+                    u_template_index: { value: gestureState.templateIndex },
+                    u_time: { value: 0.0 },
+                    u_zoom: { value: 1.0 }
+                },
+                vertexShader: `
+                    attribute float size;
+                    attribute vec3 color;
+                    uniform float u_pinch_distance;
+                    uniform float u_template_index;
+                    uniform float u_time;
+                    uniform float u_zoom;
+                    varying vec3 vColor;
+
+                    void main() {
+                        vColor = color;
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        
+                        float finalSize = size * 2.0 * u_pinch_distance * u_zoom;
+
+                        if (u_template_index == 2.0) {
+                            mvPosition.y += sin(u_time + position.x * 0.5) * 0.1 * u_pinch_distance;
+                        }
+                        
+                        gl_PointSize = finalSize * (300.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    varying vec3 vColor;
+
+                    void main() {
+                        vec2 center = gl_PointCoord - vec2(0.5);
+                        float dist = length(center);
+                        
+                        if (dist > 0.5) discard;
+                        
+                        float alpha = 1.0 - smoothstep(0.3, 0.5, dist);
+                        gl_FragColor = vec4(vColor, alpha);
+                    }
+                `,
+                blending: THREE.AdditiveBlending,
+                depthTest: false,
+                transparent: true
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+        }
+
+        // --- HAND TRACKING ---
+
+        async function initHandTracking() {
+            try {
+                video = document.getElementById('webcam-video');
+                
+                hands = new Hands({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                    }
+                });
+
+                hands.setOptions({
+                    maxNumHands: 1,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                hands.onResults(onResults);
+
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { width: 640, height: 480 } 
+                });
+                video.srcObject = stream;
+                
+                await video.play();
+                
+                document.getElementById('status-display').innerHTML = 
+                    "Status: ✓ Ready<br>Mode: Default";
+                
+                detectHands();
+            } catch (err) {
+                console.error("Initialization error:", err);
+                document.getElementById('status-display').innerText = 
+                    "Error: " + err.message;
+            }
+        }
+
+        async function detectHands() {
+            if (video.readyState === 4) {
+                await hands.send({ image: video });
+            }
+            requestAnimationFrame(detectHands);
+        }
+
+        function onResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+
+                // HAND POSITION TRACKING - use palm center for smooth movement
+                const palm = landmarks[0];
+                const middleBase = landmarks[9];
+                
+                // Average palm position for stability
+                gestureState.handX = (palm.x + middleBase.x) / 2;
+                gestureState.handY = (palm.y + middleBase.y) / 2;
+                
+                // Track hand depth (z-coordinate) for zoom
+                // MediaPipe z is relative depth: negative = closer, positive = farther
+                gestureState.handZ = (palm.z + middleBase.z) / 2;
+
+                // Calculate Pinch Distance (Thumb Tip: 4, Index Finger Tip: 8)
+                const thumbTip = landmarks[4];
+                const indexTip = landmarks[8];
+                
+                const dx = thumbTip.x - indexTip.x;
+                const dy = thumbTip.y - indexTip.y;
+                const dz = thumbTip.z - indexTip.z;
+                const distance = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                
+                const normalizedDistance = Math.max(0.05, Math.min(0.4, distance));
+                gestureState.pinchDistance = 0.05 + (normalizedDistance - 0.05) / 0.35 * 3.95;
+
+                // IMPROVED: Fist detection using all fingertips
+                const middleTip = landmarks[12];
+                const ringTip = landmarks[16];
+                const pinkyTip = landmarks[20];
+                
+                // Calculate average distance of fingertips to palm
+                const dist1 = Math.sqrt(Math.pow(middleTip.x - palm.x, 2) + Math.pow(middleTip.y - palm.y, 2));
+                const dist2 = Math.sqrt(Math.pow(ringTip.x - palm.x, 2) + Math.pow(ringTip.y - palm.y, 2));
+                const dist3 = Math.sqrt(Math.pow(pinkyTip.x - palm.x, 2) + Math.pow(pinkyTip.y - palm.y, 2));
+                const avgDistance = (dist1 + dist2 + dist3) / 3;
+                
+                // Detect fist: all fingers close to palm
+                const isFist = avgDistance < 0.15;
+                
+                if (isFist && gestureState.currentGesture !== "Switching") {
+                    gestureState.currentGesture = "Switching";
+                    gestureState.templateIndex = (gestureState.templateIndex + 1) % 4; // Changed to 4 modes
+                    
+                    if (gestureState.templateIndex === 1) {
+                        createHeartPattern();
+                    } else if (gestureState.templateIndex === 2) {
+                        resetParticlesForFireworks();
+                    } else if (gestureState.templateIndex === 3) {
+                        createSaturnPattern();
+                    } else {
+                        resetToDefault();
+                    }
+                    
+                    setTimeout(() => { gestureState.currentGesture = "None"; }, 1000);
+                } else if (!isFist && gestureState.currentGesture === "Switching") {
+                    gestureState.currentGesture = "None";
+                }
+
+                const modes = ["Default", "Hearts ❤️", "Fireworks 🎆", "Saturn 🪐"];
+                const fistStatus = isFist ? " 👊 FIST!" : "";
+                const zoomLevel = Math.round((0.5 + gestureState.handZ) * 100); // Show scale percentage
+                document.getElementById('status-display').innerHTML = 
+                    `Status: ✓ Tracking${fistStatus}<br>Mode: ${modes[gestureState.templateIndex]}<br>Size: ${Math.round(gestureState.pinchDistance * 100)}%<br>Zoom: ${zoomLevel}%`;
+            } else {
+                gestureState.pinchDistance = 1.0;
+                gestureState.handX = 0.5;
+                gestureState.handY = 0.5;
+                gestureState.handZ = 0;
+            }
+        }
+
+        function createHeartPattern() {
+            const positions = particleAttributes.positions;
+            const colors = particleAttributes.colors;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const t = (i / PARTICLE_COUNT) * Math.PI * 2;
+                const x = 16 * Math.pow(Math.sin(t), 3);
+                const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                
+                positions[i * 3 + 0] = x * 0.15 + (Math.random() - 0.5) * 0.5;
+                positions[i * 3 + 1] = y * 0.15 + (Math.random() - 0.5) * 0.5;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 2;
+                
+                colors[i * 3 + 0] = 1.0;
+                colors[i * 3 + 1] = 0.1;
+                colors[i * 3 + 2] = 0.3;
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        function resetParticlesForFireworks() {
+            const positions = particleAttributes.positions;
+            const velocities = particleAttributes.velocities;
+            const colors = particleAttributes.colors;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                positions[i * 3 + 0] = 0;
+                positions[i * 3 + 1] = 0;
+                positions[i * 3 + 2] = 0;
+                
+                velocities[i * 3 + 0] = (Math.random() - 0.5) * 0.15;
+                velocities[i * 3 + 1] = Math.random() * 0.15 + 0.05;
+                velocities[i * 3 + 2] = (Math.random() - 0.5) * 0.15;
+
+                colors[i * 3 + 0] = Math.random();
+                colors[i * 3 + 1] = Math.random();
+                colors[i * 3 + 2] = Math.random();
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        function createSaturnPattern() {
+            const positions = particleAttributes.positions;
+            const colors = particleAttributes.colors;
+            const velocities = particleAttributes.velocities;
+            
+            // Divide particles between planet body and rings
+            const planetParticles = Math.floor(PARTICLE_COUNT * 0.4); // 40% for planet
+            const ringParticles = PARTICLE_COUNT - planetParticles; // 60% for rings
+            
+            // Create Saturn's sphere body
+            for (let i = 0; i < planetParticles; i++) {
+                // Random point on sphere using spherical coordinates
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                const radius = 1.5 + Math.random() * 0.2; // Slight variation for texture
+                
+                positions[i * 3 + 0] = radius * Math.sin(phi) * Math.cos(theta);
+                positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+                positions[i * 3 + 2] = radius * Math.cos(phi);
+                
+                // Saturn's golden/yellow color with bands
+                const bandEffect = Math.sin(phi * 8) * 0.1 + 0.9;
+                colors[i * 3 + 0] = 0.9 * bandEffect; // Red
+                colors[i * 3 + 1] = 0.7 * bandEffect; // Green
+                colors[i * 3 + 2] = 0.3 * bandEffect; // Blue
+                
+                velocities[i * 3 + 0] = 0;
+                velocities[i * 3 + 1] = 0;
+                velocities[i * 3 + 2] = 0;
+            }
+            
+            // Create Saturn's iconic rings
+            for (let i = planetParticles; i < PARTICLE_COUNT; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                
+                // Multiple ring bands at different radii
+                const ringChoice = Math.random();
+                let radius;
+                if (ringChoice < 0.3) {
+                    radius = 2.2 + Math.random() * 0.3; // Inner ring
+                } else if (ringChoice < 0.7) {
+                    radius = 2.6 + Math.random() * 0.4; // Middle ring
+                } else {
+                    radius = 3.2 + Math.random() * 0.3; // Outer ring
+                }
+                
+                positions[i * 3 + 0] = radius * Math.cos(angle);
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 0.1; // Thin ring thickness
+                positions[i * 3 + 2] = radius * Math.sin(angle);
+                
+                // Ring colors - ice and rock (white, light blue, light brown)
+                const ringColorChoice = Math.random();
+                if (ringColorChoice < 0.6) {
+                    // Ice particles (white/light blue)
+                    colors[i * 3 + 0] = 0.9 + Math.random() * 0.1;
+                    colors[i * 3 + 1] = 0.9 + Math.random() * 0.1;
+                    colors[i * 3 + 2] = 0.95 + Math.random() * 0.05;
+                } else {
+                    // Rock particles (brownish)
+                    colors[i * 3 + 0] = 0.7 + Math.random() * 0.2;
+                    colors[i * 3 + 1] = 0.6 + Math.random() * 0.1;
+                    colors[i * 3 + 2] = 0.4 + Math.random() * 0.1;
+                }
+                
+                velocities[i * 3 + 0] = 0;
+                velocities[i * 3 + 1] = 0;
+                velocities[i * 3 + 2] = 0;
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        function resetToDefault() {
+            const positions = particleAttributes.positions;
+            const colors = particleAttributes.colors;
+            const velocities = particleAttributes.velocities;
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                positions[i * 3 + 0] = (Math.random() - 0.5) * 10;
+                positions[i * 3 + 1] = (Math.random() - 0.5) * 10;
+                positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
+
+                colors[i * 3 + 0] = Math.random() * 0.5 + 0.5;
+                colors[i * 3 + 1] = Math.random() * 0.5 + 0.5;
+                colors[i * 3 + 2] = 1.0;
+
+                velocities[i * 3 + 0] = 0;
+                velocities[i * 3 + 1] = 0;
+                velocities[i * 3 + 2] = 0;
+            }
+            
+            geometry.attributes.position.needsUpdate = true;
+            geometry.attributes.color.needsUpdate = true;
+        }
+
+        // --- ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const deltaTime = clock.getDelta();
+            material.uniforms.u_time.value += deltaTime;
+            material.uniforms.u_pinch_distance.value = gestureState.pinchDistance;
+            material.uniforms.u_template_index.value = gestureState.templateIndex;
+
+            // HAND-CONTROLLED ROTATION
+            // Map hand position to rotation (0-1 range to -PI to PI range)
+            const targetRotationY = -(gestureState.handX - 0.5) * Math.PI * 2; // Reversed horizontal
+            const targetRotationX = (gestureState.handY - 0.5) * Math.PI; // Reversed vertical
+            
+            // Smooth interpolation for natural movement
+            particles.rotation.y += (targetRotationY - particles.rotation.y) * 0.1;
+            particles.rotation.x += (targetRotationX - particles.rotation.x) * 0.1;
+
+            // HAND-CONTROLLED ZOOM (based on hand depth)
+            // Hand close (negative z) = small objects, Hand far (positive z) = large objects
+            // MediaPipe z range is roughly -0.5 (close) to 0.5 (far)
+            // Map handZ directly to zoom scale: -0.5 -> 0.3x, 0 -> 1x, 0.5 -> 2x
+            const zoomScale = 1.0 + gestureState.handZ * 3.0; // Range from ~0.5x to ~2.5x
+            const clampedZoom = Math.max(0.3, Math.min(3.0, zoomScale)); // Clamp for safety
+            
+            // Update zoom uniform for particle size scaling
+            material.uniforms.u_zoom.value = clampedZoom;
+
+            // Fireworks physics
+            if (gestureState.templateIndex === 2) {
+                const positions = particleAttributes.positions;
+                const velocities = particleAttributes.velocities;
+                const gravity = 0.003;
+                
+                for (let i = 0; i < PARTICLE_COUNT; i++) {
+                    const i3 = i * 3;
+                    positions[i3 + 0] += velocities[i3 + 0];
+                    positions[i3 + 1] += velocities[i3 + 1];
+                    positions[i3 + 2] += velocities[i3 + 2];
+                    velocities[i3 + 1] -= gravity;
+                    
+                    // Reset if particle falls too far
+                    if (positions[i3 + 1] < -5) {
+                        positions[i3 + 0] = 0;
+                        positions[i3 + 1] = 0;
+                        positions[i3 + 2] = 0;
+                        velocities[i3 + 0] = (Math.random() - 0.5) * 0.15;
+                        velocities[i3 + 1] = Math.random() * 0.15 + 0.05;
+                        velocities[i3 + 2] = (Math.random() - 0.5) * 0.15;
+                    }
+                }
+                geometry.attributes.position.needsUpdate = true;
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- MAIN EXECUTION ---
+        initThreeJS();
+        initHandTracking();
+        animate();
+    </script>
+</body>
+</html>
