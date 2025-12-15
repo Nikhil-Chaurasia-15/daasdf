@@ -5,11 +5,27 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hand Gesture Interactive 3D Particles</title>
     <style>
-        body { margin: 0; overflow: hidden; background-color: #000; font-family: monospace; }
-        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #000; 
+            font-family: monospace;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            touch-action: none;
+        }
+        #canvas-container { 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            width: 100%; 
+            height: 100%; 
+            z-index: 1; 
+        }
         #webcam-video {
-            width: 320px;
-            height: 240px;
+            width: 160px;
+            height: 120px;
             transform: scaleX(-1);
             position: absolute;
             top: 10px;
@@ -17,45 +33,105 @@
             border: 2px solid #00ffff;
             z-index: 10;
             border-radius: 8px;
+            object-fit: cover;
         }
         #status-display {
             position: absolute;
             top: 10px;
             right: 10px;
-            padding: 15px;
+            padding: 10px;
             background: rgba(0, 0, 0, 0.8);
             color: #00ffff;
             font-family: monospace;
+            font-size: 11px;
             z-index: 10;
             border-radius: 8px;
             border: 1px solid #00ffff;
-            min-width: 200px;
+            min-width: 150px;
+            max-width: 180px;
         }
         #instructions {
             position: absolute;
-            bottom: 20px;
+            bottom: 10px;
             left: 50%;
             transform: translateX(-50%);
-            padding: 15px;
+            padding: 10px;
             background: rgba(0, 0, 0, 0.8);
             color: #00ffff;
+            font-size: 11px;
             z-index: 10;
             border-radius: 8px;
             border: 1px solid #00ffff;
             text-align: center;
+            max-width: 90%;
+        }
+        #permission-prompt {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.95);
+            color: #00ffff;
+            z-index: 100;
+            border-radius: 12px;
+            border: 2px solid #00ffff;
+            text-align: center;
+            max-width: 80%;
+        }
+        #start-button {
+            margin-top: 15px;
+            padding: 12px 24px;
+            background: #00ffff;
+            color: #000;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            font-family: monospace;
+        }
+        #start-button:active {
+            background: #00cccc;
+        }
+        @media (max-width: 768px) {
+            #webcam-video {
+                width: 120px;
+                height: 90px;
+                top: 5px;
+                left: 5px;
+            }
+            #status-display {
+                top: 5px;
+                right: 5px;
+                padding: 8px;
+                font-size: 10px;
+                min-width: 120px;
+            }
+            #instructions {
+                font-size: 10px;
+                padding: 8px;
+                bottom: 5px;
+            }
         }
     </style>
 </head>
 <body>
-    <div id="status-display">Status: Initializing...</div>
-    <div id="instructions">
+    <div id="permission-prompt">
+        <h2 style="margin-top: 0;">📱 Camera Access Required</h2>
+        <p>This app uses your camera to track hand gestures.<br>Tap the button below to start.</p>
+        <button id="start-button">Start Experience</button>
+    </div>
+    
+    <div id="status-display" style="display: none;">Status: Initializing...</div>
+    <div id="instructions" style="display: none;">
         🖐️ Move hand left/right/up/down: Rotate particles<br>
         🤚 Move hand near/far: Zoom in/out<br>
         👌 Pinch: Control particle size<br>
         ✊ Fist: Switch modes
     </div>
     
-    <video id="webcam-video" autoplay playsinline></video>
+    <video id="webcam-video" autoplay playsinline muted style="display: none;"></video>
     <div id="canvas-container"></div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -201,21 +277,43 @@
 
                 hands.onResults(onResults);
 
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { width: 640, height: 480 } 
-                });
+                // Mobile-friendly camera constraints
+                const constraints = {
+                    video: {
+                        facingMode: 'user', // Front camera
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                };
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 video.srcObject = stream;
                 
                 await video.play();
                 
-                document.getElementById('status-display').innerHTML = 
-                    "Status: ✓ Ready<br>Mode: Default";
+                // Show UI elements
+                video.style.display = 'block';
+                document.getElementById('status-display').style.display = 'block';
+                document.getElementById('status-display').innerHTML = "Status: ✓ Ready<br>Mode: Default";
+                document.getElementById('instructions').style.display = 'block';
                 
                 detectHands();
             } catch (err) {
                 console.error("Initialization error:", err);
-                document.getElementById('status-display').innerText = 
-                    "Error: " + err.message;
+                document.getElementById('permission-prompt').innerHTML = 
+                    `<h2 style="color: #ff5555;">❌ Camera Error</h2>
+                    <p>${err.message}</p>
+                    <p style="font-size: 12px; margin-top: 15px;">
+                    Please ensure:<br>
+                    • Camera permissions are granted<br>
+                    • Using HTTPS or localhost<br>
+                    • Camera is not in use by another app
+                    </p>
+                    <button id="retry-button" style="margin-top: 15px; padding: 12px 24px; background: #00ffff; color: #000; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; font-family: monospace;">Retry</button>`;
+                
+                document.getElementById('retry-button').onclick = () => {
+                    location.reload();
+                };
             }
         }
 
@@ -506,8 +604,13 @@
 
         // --- MAIN EXECUTION ---
         initThreeJS();
-        initHandTracking();
         animate();
+        
+        // Wait for user interaction (required on mobile)
+        document.getElementById('start-button').onclick = async () => {
+            document.getElementById('permission-prompt').style.display = 'none';
+            await initHandTracking();
+        };
     </script>
 </body>
 </html>
